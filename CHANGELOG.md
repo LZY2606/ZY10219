@@ -5,6 +5,16 @@ All notable changes to Croner will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- `previousRuns()` no longer returns an instant equal to or later than its reference when searching backward across a forward DST gap (e.g. a daily job at a nonexistent local time)
+- `previousRuns()` no longer overflows the stack or emits non-matching days for constrained combinations such as `31 2` (February 31st), `29 2` around leap days and hour stepping combined with a constrained day of month
+
+### Added
+- Fixed-seed metamorphic test suite (`test/metamorphic.test.ts`) linking forward enumeration, backward enumeration, `match()` and pattern canonicalization, with directed seeds for DST gaps/overlaps, half-hour transitions, leap days, last-day/nth-weekday modifiers, day offset, question mark and overrun protection
+- Documentation for enumeration endpoints, open/closed round-trip semantics, DST behavior, complexity and compatibility (`docs/src/usage/enumeration.md`)
+
 ## [10.0.1] - 2026-02-01
 
 ### Fixed

@@ -233,6 +233,8 @@ Croner uses [Vixie Cron](https://en.wikipedia.org/wiki/Cron#CRON_expression) bas
 | \@daily / \@midnight | Run once a day, i.e.   "0 0 * * *". |
 | \@hourly | Run once an hour, i.e. "0 * * * *". |
 
+**Enumeration semantics.** `nextRun(t)` and `previousRuns(n, t)` exclude the reference endpoint, forward/backward sequences are strictly ordered and exact inverses on half-open intervals away from irreversible DST gaps, and every emitted run satisfies `match()` except a spring-gap run that was adjusted forward (see [Enumeration, Matching and DST](docs/src/usage/enumeration.md)).
+
 ## Why another JavaScript cron implementation
 
 Because the existing ones are not good enough. They have serious bugs, use bloated dependencies, do not work in all environments, and/or simply do not work as expected.

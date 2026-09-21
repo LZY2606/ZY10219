@@ -654,6 +654,13 @@ class CronDate<T = undefined> {
     pattern: CronPattern,
     options: CronOptions<T>,
   ): CronDate<T> | null {
+    // Capture the reference instant. A wall-clock time inside a forward DST
+    // gap does not exist in the target timezone and maps to the first instant
+    // after the gap; without an explicit lower bound, backward search could
+    // resolve such a candidate to the same or a later instant. All searches
+    // below must therefore resolve strictly before this instant.
+    const referenceTime = this.getTime();
+
     // Move to previous second, or decrement according to minimum interval indicated by option `interval: x`
     this.second -= (options.interval !== undefined && options.interval > 1) ? options.interval : 1;
 
@@ -663,8 +670,16 @@ class CronDate<T = undefined> {
     // Make sure seconds has not gotten out of bounds (can be negative)
     this.apply();
 
-    // Recursively change each part (y, m, d ...) until previous match is found, return null on failure
-    return this.recurseBackward(pattern, options, 0, 0);
+    const candidate = this.recurseBackward(pattern, options, 0, 0, referenceTime);
+
+    // A full backward traversal that ends on a wall-clock time inside a DST
+    // gap (e.g. a daily job scheduled exactly at a non-existent local time)
+    // can still map onto the gap edge. Step over it once in that case.
+    if (candidate !== null && candidate.getTime() >= referenceTime) {
+      return candidate.decrement(pattern, options);
+    }
+
+    return candidate;
   }
 
   /**
@@ -688,6 +703,7 @@ class CronDate<T = undefined> {
     options: CronOptions<T>,
     doing: number,
     depth: number = 0,
+    lowerBound?: number,
   ): CronDate<T> | null {
     // Safety: prevent infinite recursion
     if (depth > 10000) {
@@ -740,9 +756,27 @@ class CronDate<T = undefined> {
       RecursionSteps[doing][2],
     );
 
+    // Month-level feasibility gate, independent of the match status above:
+    // if the current month matches the month part but no day in it can
+    // satisfy the day-of-month / day-of-week parts ("31st of February", or a
+    // provisional month left behind by a day-level rollback), skip it
+    // immediately instead of descending into a day-level dead end. Months
+    // that fail the month part are handled by the regular res === 3 parent
+    // rollback below.
+    if (
+      doing === 0 &&
+      pattern.month[this.month] &&
+      !this.monthCanContainMatchingDay(pattern, options)
+    ) {
+      return this.skipToPreviousFeasibleMonth(pattern, options, depth, lowerBound);
+    }
+
     // Component changed
     if (res > 1) {
-      // Flag following levels for reset to their maximum values
+      // Flag following levels for reset to their maximum values. Day values
+      // must be capped to the last day of the (possibly freshly selected)
+      // month before any normalization runs, otherwise e.g. resetting to
+      // day 31 in February overflows into March and corrupts the month.
       let resetLevel = doing + 1;
       while (resetLevel < RecursionSteps.length) {
         // Reset to maximum valid value for each component
@@ -750,7 +784,10 @@ class CronDate<T = undefined> {
         const offset = RecursionSteps[resetLevel][2];
 
         // Find the maximum valid value in the pattern
-        const maxValue = this.getMaxPatternValue(target, pattern, offset);
+        let maxValue = this.getMaxPatternValue(target, pattern, offset);
+        if (target === "day") {
+          maxValue = Math.min(maxValue, this.getLastDayOfMonth(this.year, this.month));
+        }
         this[target] = maxValue;
 
         resetLevel++;
@@ -758,111 +795,71 @@ class CronDate<T = undefined> {
 
       // Parent changed
       if (res === 3) {
-        // Decrement parent
-        this[RecursionSteps[doing][1]]--;
-
-        // Special handling: if we just decremented year, we need to handle day overflow in the current month
         if (doing === 0) {
-          // Get the last day of the current month (after year decrement)
-          const lastDayOfMonth = this.getLastDayOfMonth(this.year, this.month);
-
-          // If current day exceeds the last day of the month, cap it
-          if (this.day > lastDayOfMonth) {
-            this.day = lastDayOfMonth;
-          }
+          // No earlier matching month exists in the current search position;
+          // walk back to the previous matching, day-feasible month (this
+          // also crosses year boundaries and honors the year part).
+          return this.skipToPreviousFeasibleMonth(pattern, options, depth, lowerBound);
         }
 
-        // Special handling: if we just decremented month, we need to handle day overflow
         if (doing === 1) {
-          // If day is 0 or negative, set to 1 temporarily so apply() doesn't misinterpret it
-          if (this.day <= 0) {
-            this.day = 1;
-          } else {
-            // If day is too large for the new month, cap it to avoid overflow during apply()
-            // We need to check what the new month will be after normalization
-            let tempYear = this.year;
-            let tempMonth = this.month;
+          // Day-level rollback: no earlier matching day exists in the
+          // current month. Skip directly to the previous matching,
+          // day-feasible month (crossing month/year boundaries and honoring
+          // the year part); finer levels are reset there.
+          return this.skipToPreviousFeasibleMonth(pattern, options, depth, lowerBound);
+        }
 
-            // Normalize month if it's out of bounds
-            while (tempMonth < 0) {
-              tempMonth += 12;
-              tempYear--;
-            }
-            while (tempMonth > 11) {
-              tempMonth -= 12;
-              tempYear++;
-            }
-
-            // Get the last day of the normalized month
-            const lastDayOfMonth = tempMonth !== 1
-              ? DaysOfMonth[tempMonth]
-              : new Date(Date.UTC(tempYear, tempMonth + 1, 0)).getUTCDate();
-
-            // If current day exceeds the last day of the new month, cap it
-            if (this.day > lastDayOfMonth) {
-              this.day = lastDayOfMonth;
+        // Hour/minute/second rollback. This is the backward mirror of the
+        // forward res === 3 handling: decrement the immediate parent, cap
+        // the day for normalization when a rollover crosses a month
+        // boundary, then reset the current and finer levels to their
+        // maximum candidates and re-enter at the parent level.
+        this[RecursionSteps[doing][1]]--;
+        if (this.day > 0) {
+          const normalizedMonth = ((this.month % 12) + 12) % 12;
+          const normalizedYear = this.year + Math.floor(this.month / 12);
+          if (normalizedYear >= 1) {
+            const lastDayOfNewMonth = this.getLastDayOfMonth(normalizedYear, normalizedMonth);
+            if (this.day > lastDayOfNewMonth) {
+              this.day = lastDayOfNewMonth;
             }
           }
         }
-
-        // Apply to normalize the date (e.g., month -1 becomes December of previous year)
+        this.apply();
+        for (let level = doing; level < RecursionSteps.length; level++) {
+          const levelTarget = RecursionSteps[level][0];
+          const levelOffset = RecursionSteps[level][2];
+          this[levelTarget] = this.getMaxPatternValue(levelTarget, pattern, levelOffset);
+        }
         this.apply();
 
-        // Now reset current level to max based on the normalized date
-        const target = RecursionSteps[doing][0];
-        const offset = RecursionSteps[doing][2];
-        const maxValue = this.getMaxPatternValue(target, pattern, offset);
-
-        // For day patterns, cap at the actual last day of the current month
-        if (target === "day") {
-          const lastDayOfMonth = this.getLastDayOfMonth(this.year, this.month);
-          this[target] = Math.min(maxValue, lastDayOfMonth);
-        } else {
-          this[target] = maxValue;
-        }
-
-        // Apply again to ensure the date is valid
-        this.apply();
-
-        // After resetting the current level and normalizing, we may need to reset child levels again
-        // This happens when, for example, we cap day to 30 for November, then normalize back to December
-        // In that case, day should be reset to 31 for December
-        if (doing === 0) {
-          // We just reset month - check if day needs to be reset based on the new month
-          const dayOffset = RecursionSteps[1][2]; // offset for day
-          const dayMaxValue = this.getMaxPatternValue("day", pattern, dayOffset);
-          const lastDayOfMonth = this.getLastDayOfMonth(this.year, this.month);
-          const newDay = Math.min(dayMaxValue, lastDayOfMonth);
-          if (newDay !== this.day) {
-            this.day = newDay;
-            // Reset hour/minute/second as well since day changed
-            this.hour = this.getMaxPatternValue("hour", pattern, RecursionSteps[2][2]);
-            this.minute = this.getMaxPatternValue("minute", pattern, RecursionSteps[3][2]);
-            this.second = this.getMaxPatternValue("second", pattern, RecursionSteps[4][2]);
-          }
-        }
-
-        // OCPS 1.2: If we just decremented the year and have year constraints, check if it matches
-        if (doing === 0 && !pattern.starYear) {
-          // Keep decrementing year until we find a matching one
-          while (
-            this.year >= 0 &&
-            this.year < pattern.year.length &&
-            pattern.year[this.year] === 0
-          ) {
-            this.year--;
-          }
-
-          // Check if we've gone out of bounds
-          if (this.year < 0) {
-            return null;
-          }
-        }
-
-        // Restart
-        return this.recurseBackward(pattern, options, 0, depth + 1);
+        // Re-enter from the top. A same-field rollback (e.g. minute 14 ->
+        // 15) is matched again immediately on the way down; a rollover that
+        // crossed a day boundary is validated by the month/day searches and
+        // their feasibility gates, which skip a non-matching day instead of
+        // accepting it.
+        return this.recurseBackward(
+          pattern,
+          options,
+          0,
+          depth + 1,
+          lowerBound,
+        );
       } else if (this.apply()) {
-        return this.recurseBackward(pattern, options, doing - 1, depth + 1);
+        // Normalization changed components. At month level this is the
+        // day-overflow capping (e.g. candidate day 31 normalized in a
+        // shorter month): the month part is already satisfied by res === 2,
+        // so restart at day level to pick the last valid day, never at
+        // month level (which would re-match and roll the month forever).
+        // At lower levels, re-enter one level up like forward recursion.
+        return this.recurseBackward(
+          pattern,
+          options,
+          doing > 0 ? doing - 1 : 1,
+          depth + 1,
+          lowerBound,
+        );
       }
     }
 
@@ -871,6 +868,16 @@ class CronDate<T = undefined> {
 
     // Done?
     if (doing >= RecursionSteps.length) {
+      // During a backward DST overlap (fall back) one local wall-clock time
+      // maps to two instants. Component matching alone cannot tell them
+      // apart; enforce the exclusive lower bound here and keep searching
+      // backwards when this instant is not strictly before the reference.
+      if (lowerBound !== undefined && this.getTime() >= lowerBound) {
+        this.second -= 1;
+        this.ms = 0;
+        this.apply();
+        return this.recurseBackward(pattern, options, 0, depth + 1, lowerBound);
+      }
       return this;
 
       // ... or out of bounds ?
@@ -879,8 +886,123 @@ class CronDate<T = undefined> {
 
       // ... oh, go to next part then
     } else {
-      return this.recurseBackward(pattern, options, doing, depth + 1);
+      return this.recurseBackward(pattern, options, doing, depth + 1, lowerBound);
     }
+  }
+
+  /**
+   * Walk backwards month by month until a month matching the month part and
+   * containing at least one feasible day is reached. Day and finer levels are
+   * then reset to their maximum candidates and the search continues at day
+   * level. Returns null when no such month exists before year 1.
+   */
+  private skipToPreviousFeasibleMonth(
+    pattern: CronPattern,
+    options: CronOptions<T>,
+    depth: number,
+    lowerBound?: number,
+  ): CronDate<T> | null {
+    if (depth > 10000) {
+      return null;
+    }
+
+    let guard = 0;
+    while (guard++ < 12 * 10000) {
+      this.month--;
+      if (this.month < 0) {
+        this.month = 11;
+        this.year--;
+      }
+      if (this.year < 1) {
+        return null;
+      }
+
+      if (
+        !pattern.starYear &&
+        (this.year >= pattern.year.length || pattern.year[this.year] === 0)
+      ) {
+        continue;
+      }
+
+      if (
+        pattern.month[this.month] &&
+        this.monthCanContainMatchingDay(pattern, options)
+      ) {
+        break;
+      }
+    }
+
+    this.day = Math.min(
+      this.getMaxPatternValue("day", pattern, -1),
+      this.getLastDayOfMonth(this.year, this.month),
+    );
+    this.hour = this.getMaxPatternValue("hour", pattern, 0);
+    this.minute = this.getMaxPatternValue("minute", pattern, 0);
+    this.second = this.getMaxPatternValue("second", pattern, 0);
+    this.apply();
+
+    return this.recurseBackward(pattern, options, 1, depth + 1, lowerBound);
+  }
+
+  /**
+   * Check whether the currently selected month (this.year, this.month) can
+   * contain at least one day accepted by the day-of-month / day-of-week parts
+   * of the pattern, honoring the same OR/AND combination and L/W modifiers
+   * used by the forward and backward searches.
+   */
+  private monthCanContainMatchingDay(
+    pattern: CronPattern,
+    options: CronOptions<T>,
+  ): boolean {
+    // Only the day side is evaluated here: whether the currently selected
+    // month has at least one day accepted by day-of-month / day-of-week. The
+    // month part itself is matched by the main backward search; after a
+    // rollback the provisional month may intentionally not match yet.
+    const lastDay = this.getLastDayOfMonth(this.year, this.month);
+    const fDomWeekDay = new Date(Date.UTC(this.year, this.month, 1)).getUTCDay();
+
+    for (let day = 1; day <= lastDay; day++) {
+      // Evaluate the day-of-month side exactly like _findMatch does.
+      let domMatch = pattern.day[day - 1];
+
+      if (!domMatch) {
+        for (let dayWithW = 0; dayWithW < pattern.nearestWeekdays.length; dayWithW++) {
+          if (!pattern.nearestWeekdays[dayWithW]) continue;
+          if (this.getNearestWeekday(this.year, this.month, dayWithW + 1) === day) {
+            domMatch = 1;
+            break;
+          }
+        }
+      }
+      if (pattern.lastWeekday && this.getLastWeekday(this.year, this.month) === day) {
+        domMatch = 1;
+      }
+      if (pattern.lastDayOfMonth && day === lastDay) {
+        domMatch = 1;
+      }
+
+      if (pattern.starDOW) {
+        if (domMatch) return true;
+        continue;
+      }
+
+      let dowMatch = pattern.dayOfWeek[(fDomWeekDay + (day - 1)) % 7];
+      if (dowMatch && (dowMatch & ANY_OCCURRENCE)) {
+        dowMatch = this.isNthWeekdayOfMonth(this.year, this.month, day, dowMatch) ? 1 : 0;
+      }
+
+      // Mirror the combination logic from _findMatch.
+      let combined: number;
+      if (pattern.useAndLogic) {
+        combined = domMatch && dowMatch;
+      } else if (!options.domAndDow && !pattern.starDOM) {
+        combined = domMatch || dowMatch;
+      } else {
+        combined = domMatch && dowMatch;
+      }
+      if (combined) return true;
+    }
+    return false;
   }
 
   /**

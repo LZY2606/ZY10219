@@ -8,6 +8,8 @@ nav_order: 2
 
 ---
 
+> See [Enumeration, Matching and DST](enumeration.md) for the exact endpoint, round-trip and daylight-saving semantics of `nextRun()`, `previousRuns()` and `match()`.
+
 Croner is fully compliant with the [Open Cron Pattern Specification (OCPS)](https://github.com/open-source-cron/ocps) versions 1.0 through 1.4. The expressions are based on Vixie Cron with powerful extensions:
 
 ```ts
