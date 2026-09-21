@@ -1,0 +1,59 @@
+name: Cross Runtime Tests
+
+on: 
+  push:
+    branches: [main, dev, dev-9]
+  pull_request:
+    branches: [main, dev, dev-9]
+
+jobs:
+  deno_ci:
+    uses: cross-org/workflows/.github/workflows/deno-ci.yml@main
+    with:
+      entrypoint: src/croner.ts
+      lint_docs: false
+  bun_ci:
+    uses: cross-org/workflows/.github/workflows/bun-ci.yml@main
+    with:
+      jsr_dependencies: "@cross/test @std/assert"
+  node_ci:
+    uses: cross-org/workflows/.github/workflows/node-ci.yml@main
+    with:
+      test_target: "test/*.test.ts"
+      jsr_dependencies: "@cross/test @std/assert"
+
+  node_24_compatibility:
+    name: Node.js 24 Compatibility Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.x"
+
+      - name: Install dependencies
+        run: |
+          echo '{ "type": "module" }' > package.json
+          npx jsr add @cross/test @std/assert
+
+      - name: Run tests
+        run: npx --yes tsx --test test/*.test.ts
+
+  prerelease_build_check:
+    name: Esbuild + DTS check (GA parity)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: "2.x"
+
+      # Mirror the critical prerelease build step that failed on GA
+      - name: Build (esbuild + d.ts)
+        run: deno task build:esbuild

@@ -1,0 +1,163 @@
+---
+title: "Migration"
+nav_order: 4
+---
+
+# Migration
+
+---
+
+<!-- TOC -->
+
+## Upgrading Croner
+
+This section covers upgrading to Croner from previous versions. Croner follows the Semantic Versioning (SemVer) standard. Be mindful that major updates may cause breaking changes.
+
+### Upgrading from 4.x to 5.x
+
+If upgrading from version `4.x` to `5.x`, the most significant change is the way day-of-month and day-of-week are combined. You can read more about this in issue #53. The new mode is called `legacyMode` and can be disabled using the options.
+
+### Upgrading from 5.x to 6.x
+
+For upgrading from version `5.x` to `6.x`, CommonJS and UMD builds were separated in the dist folder. Several method names were also changed to make them more descriptive:
+
+*   `next()` -> `nextRun()`
+*   `enumerate()` -> `nextRuns()`
+*   `current()` -> `currentRun()`
+*   `previous()`-> `previousRun()`
+*   `running()` -> `isRunning()`
+*   `busy()` -> `isBusy()`
+
+### Upgrading from 6.x to 7.x
+
+Version `7.x` introduces significant changes, including the introduction of the nth weekday specifier `#`. Furthermore, there's a modification in the way `L` functions in the day-of-week field. In version `6.x`, `L` had flexibility in its positioning: both `LSUN` and `SUNL` were valid expressions to denote the last Sunday of the month. However, starting from version `7.x`, `L` must be used in conjunction with the nth weekday specifier `#`, like so: `SUN#L`.
+
+### Upgrading from 7.x to 8.x
+
+Version `8.x` introduces no significant changes in the API for Croner. However, a major change is the discontinuation of support for Node.js versions prior to `18.0`. It is crucial to ensure that your environment is running Node.js `18.0` or higher before upgrading to `8.x`. If you rely on Node <= `16` you should stick with `7.x`.
+
+### Upgrading from 8.x to 9.x
+
+Version 9.x brings several changes to Croner to fix existing issues and ensure consistency in code:
+
+### Changes to the API
+
+* `new` is no longer optional. Previously, it was possible to instantiate Croner using `Cron(/*...*/)` now, you need to use `new Cron(/* ... */)`.
+
+* The default export is removed. Previously, you could `import Cron from`, now you need to `import { Cron } from`. The same goes for require.
+
+### Changes to the file structure
+
+* Files in the `/dist` directory are always minified, no need to be explicit with that through the file names. As a result, `croner.min.js` is now `croner.js`.
+
+* Typings are moved from `/types` to `/dist`.
+
+* Only the `/src` directory is exposed in the JSR module.
+
+### Upgrading from 9.x to 10.x
+
+Version `10.x` introduces new pattern syntax features and configuration options.
+
+**New pattern syntax:**
+* **Year field**: 7-field patterns now supported. Example: `0 12 * * * * 2025` runs only in 2025.
+* **W modifier**: Nearest weekday to a date. Example: `0 12 15W * *` runs on weekday closest to the 15th.
+* **+ modifier**: Explicit AND logic for day matching. Example: `0 12 15 * +FRI` runs only when 15th is Friday.
+
+**Changed pattern behavior:**
+* **? character**: Now acts as wildcard alias (same as `*`). Previously replaced with current time values.
+
+**Option renamed (backward compatible):**
+* `legacyMode` is deprecated but still works. Use `domAndDow` instead.
+* `domAndDow: false` (default) uses OR logic - matches if day of month OR day of week matches.
+* `domAndDow: true` uses AND logic - matches only when both day of month AND day of week match.
+* Note: `legacyMode: true` equals `domAndDow: false`.
+
+**New options:**
+* `dayOffset` - Offset scheduled dates by a number of days. Positive shifts forward, negative shifts backward. Example: `dayOffset: -1` schedules one day before the pattern match.
+* `mode` - Specify the cron pattern mode: `"auto"` (default), `"5-part"`, `"6-part"`, `"7-part"`, `"5-or-6-parts"`, or `"6-or-7-parts"`. Controls how many fields are expected and how seconds/years are handled.
+* `alternativeWeekdays` - Enable Quartz-style weekday numbering where Sunday=1, Monday=2, ..., Saturday=7. When `false` (default), uses standard cron format where Sunday=0, Monday=1, ..., Saturday=6. Example: `new Cron("0 0 0 * * 1", { alternativeWeekdays: true })` runs on Sunday in Quartz mode.
+* `sloppyRanges` - Enable non-standard stepping formats for backward compatibility. When `false` (default), only wildcard (*\/step) or range (min-max\/step) formats are allowed, following strict vixie cron and cronie parsing rules. When `true`, allows legacy formats like `/10`, `5/5`, `30/30`. This option was added to maintain backward compatibility while enforcing OCPS compliance by default.
+
+**Pattern syntax strictness:**
+By default, Croner now follows strict range parsing rules as used by vixie cron and cronie (upcoming OCPS requirement):
+* ✅ Valid: `*/10`, `0-59/10`, `30-50/10` (wildcard or range with stepping)
+* ❌ Invalid: `/10`, `0/10`, `30/30` (missing prefix or numeric prefix with stepping)
+* To allow the old behavior, use `sloppyRanges: true` option: `new Cron("/10 * * * * *", { sloppyRanges: true })`
+
+## Switching from Cron
+
+If you're currently using the cron package and want to migrate to Croner, the following steps can guide you:
+
+### Step 1: Install Croner
+
+To install the croner package, run the following command in your terminal:
+
+```bash
+npm install croner
+```
+
+### Step 2: Update your code to use Croner
+
+The croner package has a different API compared to the cron package. Here's an example of how to create a new `CronJob` using croner:
+
+```ts
+// CronJob constructor is called just Cron in Croner
+const { Cron } = require('croner');
+
+// If you have a lot of code using the CrobJob constructor, you can re-use the name like this
+// const { Cron as CronJob } = require('croner');
+
+const job = new Cron('0 0 12 * * *', { /* options */ }, () => {
+    console.log('This job will run at 12:00 PM every day.');
+});
+
+job.start();
+```
+
+### Step 3: Update your tests
+
+If you have tests for your code, you'll need to update them to use Croner instead of Cron. Make sure to test that your jobs are still running as expected after the migration.
+
+## Switching from node-cron
+
+Here's how to migrate from the node-cron package to Croner:
+
+### Install croner package:
+
+First, install the croner package in your project:
+
+```bash
+npm install croner
+```
+
+### Replace the import statement:
+
+Next, update the import statement for cron to croner. Replace the line that reads:
+
+```ts
+const cron = require('node-cron');
+```
+
+with:
+
+```ts
+const { Cron } = require('croner');
+```
+
+### Update your cron job:
+
+Here's an example of how to migrate a cron job:
+
+```ts
+// node-cron
+cron.schedule('* * * * *', () => {
+    console.log('Running a task every minute');
+}, { timezone: "Europe/Oslo" });
+
+// croner
+new Cron('* * * * *', { timezone: "Europe/Oslo" }, () => {
+    console.log('Running a task every minute');
+});
+```
+
+By following these steps, you should be able to migrate from `node-cron` to `croner` without any issues.
